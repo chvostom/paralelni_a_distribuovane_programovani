@@ -11,14 +11,33 @@
 using namespace std;
 using namespace chrono;
 
+/*==========================================CONSTANTS===========================================*/
+/*
+ * MAX_THREADS - count of threads 
+ * THRESHOLD - count of vertices that are computed sequentially
+ */
+
+#define MAX_THREADS 8
+#define THRESHOLD 25
 /*================================GLOBAL VARIABLE - READ & WRITE================================*/
+/*
+ * minimalPrice - global variable to store the price of minimal edge cut
+ * minimalCutState - global vector which describes both sets with vertices
+ */
 
 double minimalPrice = 0.0;
 vector<bool> minimalCutState;
-vector<bool> state;
-double calling = 0.0 ;
 
 /*=========================================RESULT class=========================================*/
+/*
+ * Class which represents result of one dataset and contains:
+ * price - price of minimal edge cut
+ * complexity - number of function solve calls 
+ * time - time of whole solve process in seconds
+ * constructor without parameters
+ * constructor with parameters
+ * getters
+ */
 
 class Result{
 public:
@@ -68,6 +87,14 @@ double Result::getTime( ) {
 }
 
 /*==========================================EDGE class==========================================*/
+/*
+ * Class which represents edge between two vertices and contains:
+ * startNode - index of first node
+ * endNode - index of second node
+ * price - price value of the edge
+ * constructor with parameters
+ * getters
+ */
 
 class Edge{
 public:
@@ -108,13 +135,22 @@ double Edge::getPrice( ) {
 }
 
 /*=========================================GRAPH class==========================================*/
+/*
+ * Class that represents whole graph and contains:
+ * nodeCount - count of vertices
+ * edgeCount - count of edges
+ * graph - vector which contains vector with edges for all vertices
+ * constructor with parameters
+ * addEdge - void which add one edge to the graph
+ * getEdgesToNode - function which return vector with edges to concrete vertex of graph
+ * loadGraph - void to load input
+ */
 
 class Graph{
 public:
 	Graph( int nodes, int edges );
 	void addEdge( Edge edge );
 	vector<Edge> getEdgesToNode( int node );
-	vector<vector<Edge>> getGraph( );
 	void loadGraph( );
 	vector<vector<Edge>> graph;
 private:
@@ -148,12 +184,6 @@ vector<Edge> Graph::getEdgesToNode( int node ) {
 
 /*----------------------------------------------------------------------------------------------*/
 
-vector<vector<Edge>> Graph::getGraph( ) {
-	return this->graph;
-}
-
-/*----------------------------------------------------------------------------------------------*/
-
 void Graph::loadGraph( ) {
 	int startNode;
 	int endNode;
@@ -169,21 +199,44 @@ void Graph::loadGraph( ) {
 }
 
 /*=================================GLOBAL VARIABLE - READ ONLY==================================*/
+/* 
+ * graph - instance of Graph class which has information about graph (vertices and edges)
+ * nodeCount - count of vertices
+ * edgeCount - count of edges
+ * conditionNumber - count of vertices that the set X must contain
+ */
 
 Graph graph = Graph( 0, 0 );
 int nodeCount = 0;
 int edgeCount = 0;
 int conditionNumber = 0;
 
-/*======================================Recursion function======================================*/
+/*======================================Recursive function======================================*/
+/*
+ * Recursive function that finds minimal edge cut
+ * actualNode - index of actual vertex
+ * actualPrice - actual price of cut
+ * actualX - actual count of vertices in X set
+ * state - vector which describes both sets with vertices
+ * solve - 	1) Add new boolean to state vector for current vertex (doesn't matter if it's true or 
+ 				false) and set initial values.
+ 			2) Compute price increments (actualPriceX for vertex in X, actualPriceY for vertex in Y).
+ 			3) If it's final vertex, then check if the price is less then current minimal price
+ 				for both option (vertex in X and Y). Two threads could modify this value, so there
+ 				has to be critical section handling.
+ 			4) If it's not final vertex try to add vertex to X and then to Y and call solve function
+ 				for next vertex. If remain more than $THRESHOLD vertices, create copy of state vector
+ 				and new omp task, otherwise solve the task sequentially.
 
-void solve( int actualNode, double actualPrice, int actualX ) {
-	//Počáteční inicializace
-	calling++ ;
+ */
+
+void solve( int actualNode, double actualPrice, int actualX, vector<bool> & state ) {
+	//Initialization
+	state.push_back( false );
 	int actualY = actualNode - actualX;
 	double actualPriceX = actualPrice;
 	double actualPriceY = actualPrice;
-	//Napočítání cen
+	//Price computing
 	for ( int i = 0 ; i < ( int ) graph.graph[actualNode].size( ) ; i++ ){
 		if( state[graph.graph[actualNode][i].getStartNode( )] ){
 			actualPriceY += graph.graph[actualNode][i].getPrice( );
@@ -192,52 +245,87 @@ void solve( int actualNode, double actualPrice, int actualX ) {
 			actualPriceX += graph.graph[actualNode][i].getPrice( );
 		}
 	}
-	//Přidání
+	//Adding to sets
 	if( actualNode == ( nodeCount - 1 ) ) {
 		if ( actualX + 1 == conditionNumber ) {
-			if ( minimalPrice > actualPriceX ){
-				minimalPrice = actualPriceX;
-				state[actualNode] = true;
-				minimalCutState = state;
+			#pragma omp critical
+			{
+				if ( minimalPrice > actualPriceX ){
+					minimalPrice = actualPriceX;
+					state[actualNode] = true;
+					minimalCutState = state;
+				}
 			}
 		}
 		else if ( actualX == conditionNumber ) {
-			if ( minimalPrice > actualPriceY ){
-				minimalPrice = actualPriceY;
-				state[actualNode] = false;
-				minimalCutState = state;
+			#pragma omp critical
+			{
+				if ( minimalPrice > actualPriceY ){
+					minimalPrice = actualPriceY;
+					state[actualNode] = false;
+					minimalCutState = state;
+				}
 			}
 		}
 	}
 	else {
-		//Přidávám do X
+		//Adding to X
 		state[actualNode] = true;
 		actualX++;
 		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceX < minimalPrice ) ) {
-			solve( actualNode + 1, actualPriceX, actualX );
+			if ( nodeCount - actualNode > THRESHOLD ) {
+				vector<bool> tmpState;
+				for ( int i = 0 ; i < ( int ) state.size( ) ; i++ ) {
+					tmpState.push_back( state[i] );
+				}
+				#pragma omp task 
+					solve( actualNode + 1, actualPriceX, actualX, tmpState );
+			}
+			else {
+				solve( actualNode + 1, actualPriceX, actualX, state );
+			}
 		}
 		state[actualNode] = false;
 		actualY++;
 		actualX--;
-		//Přidávám do Y
+		//Adding to Y
 		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceY < minimalPrice ) ) {
-			solve( actualNode + 1, actualPriceY, actualX );
+			if ( nodeCount - actualNode > THRESHOLD ) {
+				vector<bool> tmpState;
+				for ( int i = 0 ; i < ( int ) state.size( ) ; i++ ) {
+					tmpState.push_back( state[i] );
+				}
+				#pragma omp task
+					solve( actualNode + 1, actualPriceY, actualX, tmpState );
+			}
+			else {
+				solve( actualNode + 1, actualPriceY, actualX, state );
+			}
 		}
 	}
 }
 
 /*=====================================Initial solve call=======================================*/
+/*
+ * Starting solving process on $MAX_THREADS threads
+ * First solve call of recursice function does only one single thread
+ */
 
 void solve( ) {
-	vector<bool> falseVector;
-	for ( int i = 1 ; i <= nodeCount ; i++ ) {
-		falseVector.push_back( false );
+	vector<bool> emptyVector;
+	#pragma omp parallel num_threads( MAX_THREADS )
+	{
+		#pragma omp single
+			solve( 0, 0, 0, emptyVector );
 	}
-	state = falseVector;
-	solve( 0, 0, 0 );
 }
 
 /*=====================================Print X and Y set========================================*/
+/*
+ * Formal representation for sets
+ * setToFormalSet - function which convert set with vertices to string in format $name={$node_1, $node_2, ... $node_n}
+ * printSets - void which gets and prints sets X and Y 
+ */
 
 string setToFormalSet( set<int> setA, string name ) {
 	string result = name + "={";
@@ -271,6 +359,10 @@ void printSets( ) {
 }
 
 /*=====================================READ INPUT DATA==========================================*/
+/*
+ * Reading input data
+ * readInput - void for reading input
+ */
 
 void readInput( ){
 	cin >> nodeCount;
@@ -280,6 +372,10 @@ void readInput( ){
 }
 
 /*====================================WRITE OUTPUT DATA=========================================*/
+/* 
+ * Result visualisation
+ * printOutput - void which prints table with results (minimum price and time)
+ */
 
 void printOutput( Result myResult, Result referenceResult ){
 	cout << "_________________________________________________________________________________________________________" << endl << endl ;
@@ -290,21 +386,26 @@ void printOutput( Result myResult, Result referenceResult ){
 	cout << "+=========================+=========================+=========================+=========================+" << endl ;
 	cout << '|' << setw(25) << "Price" << '|' << setw(25) << myResult.getPrice( ) << '|' << setw(25) << referenceResult.getPrice( ) << '|' << setw(24) << round(referenceResult.getPrice( ) / myResult.getPrice( ) * 100)  << "%" << '|' << endl;
 	cout << "+-------------------------+-------------------------+-------------------------+-------------------------+" << endl ;
-	cout << '|' << setw(25) << "Complexity" << '|' << setw(25) << myResult.getComplexity( ) << '|' << setw(25) << referenceResult.getComplexity( ) << '|' << setw(24) << round(referenceResult.getComplexity( ) / myResult.getComplexity( ) * 100)  << "%" << '|' << endl;
-	cout << "+-------------------------+-------------------------+-------------------------+-------------------------+" << endl ;
 	cout << '|' << setw(25) << "Time" << '|' << setw(24) << myResult.getTime( ) << "s" << '|' << setw(24) << referenceResult.getTime( ) << "s" << '|' << setw(24) << round(referenceResult.getTime( ) / myResult.getTime( ) * 100) << "%" << '|' << endl;
 	cout << "+=========================+=========================+=========================+=========================+" << endl ;
 }
 
 /*=============================================MAIN=============================================*/
+/*
+ * Main function with whole process
+ * 1) Reading input
+ * 2) Finding minimal edge cut
+ * 3) Measuring time
+ * 4) Showing results
+ */
 
 int main( int argc, char** argv ) {
-	auto start = steady_clock::now();
 	readInput( );
+	auto start = steady_clock::now();
 	solve( );
 	auto end = steady_clock::now();
 	double time = (double) chrono::duration_cast<chrono::nanoseconds>( end - start ).count( );
-	printOutput( Result( minimalPrice, calling, time / 1000000000 ) , Result( atof( argv[1] ), atof( argv[2] ), atof( argv[3] ) ) );
+	printOutput( Result( minimalPrice, 0, time / 1e9 ) , Result( atof( argv[1] ), atof( argv[2] ), atof( argv[3] ) ) );
 	return 0;
 }
 

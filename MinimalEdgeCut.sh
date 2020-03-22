@@ -1,5 +1,5 @@
 #!/bin/bash
-g++ -Wall -pedantic -Ofast -std=c++11 -o mhr mhr.cpp
+g++ -Wall -pedantic -fopenmp -Ofast -std=c++11 -o mhr mhr.cpp
 ./mhr 14.612 43000 0.01 < testData/mhr_20_10_5.txt
 ./mhr 22.219 17000000 0.4 < testData/mhr_30_10_10.txt
 ./mhr 28.245 76000000 1.8 < testData/mhr_30_10_15.txt	
