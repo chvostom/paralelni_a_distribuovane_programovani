@@ -6,6 +6,7 @@
 #include <string>
 #include <iomanip>
 #include <vector>
+#include <deque>
 #include <chrono>
 
 using namespace std;
@@ -14,11 +15,11 @@ using namespace chrono;
 /*==========================================CONSTANTS===========================================*/
 /*
  * MAX_THREADS - count of threads 
- * THRESHOLD - count of vertices that are computed sequentially
+ * ENOUGH_STATES - potřebný počet stavů, které musí mít STL kontejner přidělený vláknům
  */
 
 #define MAX_THREADS 8
-#define THRESHOLD 25
+#define ENOUGH_STATES 800
 /*================================GLOBAL VARIABLE - READ & WRITE================================*/
 /*
  * minimalPrice - global variable to store the price of minimal edge cut
@@ -211,9 +212,85 @@ int nodeCount = 0;
 int edgeCount = 0;
 int conditionNumber = 0;
 
+/*=========================================STATE class==========================================*/
+/*
+ * Class that represents concrete state of BFS algorithm and contains:
+ * actualNode - actual vertex of graph 
+ * actualPrice - actual price of subcut
+ * actualX - count of vertices in set X
+ * state - boolean vector that has information about content of sets X and Y
+ * constructor with and without parameters
+ * getNextBFSStates 
+ 	- function that return deque with descendants 
+	- if state has no descendants then return deque with self
+ */
+
+class BFSState{
+public:
+	BFSState( );
+	BFSState( int actualNode, double actualPrice, int actualX, vector<bool> state );
+	deque<BFSState> getNextBFSStates( );
+	int actualNode; 
+	double actualPrice; 
+	int actualX; 
+	vector<bool> state;
+};
+
+/*----------------------------------------------------------------------------------------------*/
+
+BFSState::BFSState( ){
+	this->actualNode = 0;
+	this->actualPrice = 0.0;
+	this->actualX = 0;
+}
+
+/*----------------------------------------------------------------------------------------------*/
+
+BFSState::BFSState( int actualNode, double actualPrice, int actualX, vector<bool> state ){
+	this->actualNode = actualNode;
+	this->actualPrice = actualPrice;
+	this->actualX = actualX;
+	this->state = state;
+}
+
+/*----------------------------------------------------------------------------------------------*/
+
+deque<BFSState> BFSState::getNextBFSStates( ) {
+	deque<BFSState> nextStates;
+	if ( this->actualNode == ( nodeCount - 1 ) ) {
+		nextStates.push_back( *this );
+	}
+	else{
+		state.push_back( false );
+		int actualY = actualNode - actualX;
+		double actualPriceX = actualPrice;
+		double actualPriceY = actualPrice;
+		for ( int i = 0 ; i < ( int ) graph.graph[actualNode].size( ) ; i++ ){
+			if( state[graph.graph[actualNode][i].getStartNode( )] ){
+				actualPriceY += graph.graph[actualNode][i].getPrice( );
+			}
+			else {
+				actualPriceX += graph.graph[actualNode][i].getPrice( );
+			}
+		}
+		state[actualNode] = true;
+		actualX++;
+		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceX < minimalPrice ) ) {
+			nextStates.push_back( BFSState( actualNode + 1, actualPriceX, actualX, state ) );
+		}
+		state[actualNode] = false;
+		actualY++;
+		actualX--;
+		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceY < minimalPrice ) ) {
+			nextStates.push_back( BFSState( actualNode + 1, actualPriceY, actualX, state ) );
+		}
+	}
+	return nextStates;	
+}
+
 /*======================================Recursive function======================================*/
 /*
- * Recursive function that finds minimal edge cut
+ * Recursive function for sequential solving that finds minimal edge cut
  * actualNode - index of actual vertex
  * actualPrice - actual price of cut
  * actualX - actual count of vertices in X set
@@ -225,8 +302,7 @@ int conditionNumber = 0;
  				for both option (vertex in X and Y). Two threads could modify this value, so there
  				has to be critical section handling.
  			4) If it's not final vertex try to add vertex to X and then to Y and call solve function
- 				for next vertex. If remain more than $THRESHOLD vertices, create copy of state vector
- 				and new omp task, otherwise solve the task sequentially.
+ 				for next vertex.
 
  */
 
@@ -273,51 +349,51 @@ void solve( int actualNode, double actualPrice, int actualX, vector<bool> & stat
 		state[actualNode] = true;
 		actualX++;
 		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceX < minimalPrice ) ) {
-			if ( nodeCount - actualNode > THRESHOLD ) {
-				vector<bool> tmpState;
-				for ( int i = 0 ; i < ( int ) state.size( ) ; i++ ) {
-					tmpState.push_back( state[i] );
-				}
-				#pragma omp task 
-					solve( actualNode + 1, actualPriceX, actualX, tmpState );
-			}
-			else {
-				solve( actualNode + 1, actualPriceX, actualX, state );
-			}
+			solve( actualNode + 1, actualPriceX, actualX, state );
 		}
 		state[actualNode] = false;
 		actualY++;
 		actualX--;
 		//Adding to Y
 		if( ( nodeCount - actualY >= conditionNumber ) && ( actualX <= conditionNumber ) && ( actualPriceY < minimalPrice ) ) {
-			if ( nodeCount - actualNode > THRESHOLD ) {
-				vector<bool> tmpState;
-				for ( int i = 0 ; i < ( int ) state.size( ) ; i++ ) {
-					tmpState.push_back( state[i] );
-				}
-				#pragma omp task
-					solve( actualNode + 1, actualPriceY, actualX, tmpState );
-			}
-			else {
-				solve( actualNode + 1, actualPriceY, actualX, state );
-			}
+			solve( actualNode + 1, actualPriceY, actualX, state );
 		}
 	}
 }
 
-/*=====================================Initial solve call=======================================*/
+/*==================================Start of sequential solve====================================*/
 /*
- * Starting solving process on $MAX_THREADS threads
- * First solve call of recursice function does only one single thread
+ * Void that start sequential solving
+ * bs - concrete BFS state 
  */
 
+void solve( BFSState bS ) {
+	solve( bS.actualNode, bS.actualPrice, bS.actualX, bS.state );
+}
+
+/*===============================Solve call with data parallelism================================*/
+/*
+ * 1) Creating deque "states" and add init state
+ * 2) Using WHILE cycle to generate enough states (ENOUGH_STATES is defined at start of this file)
+ * 3) Using pragma omp parallel for data parallelism
+ */
 void solve( ) {
+	deque<BFSState> states;
 	vector<bool> emptyVector;
-	#pragma omp parallel num_threads( MAX_THREADS )
-	{
-		#pragma omp single
-			solve( 0, 0, 0, emptyVector );
+	states.push_back( BFSState( 0, 0, 0, emptyVector ) );
+	while( ( int )states.size( ) < ENOUGH_STATES ) {
+		deque<BFSState> nextStates = states.front( ).getNextBFSStates( );
+		while ( nextStates.size( ) != 0 ) {
+			states.push_back( nextStates.front( ) );
+			nextStates.pop_front( );
+		}
+		states.pop_front( );
 	}
+	int countOfStates = states.size( );
+	#pragma omp parallel for schedule ( dynamic )
+		for ( int i = 0 ; i < countOfStates ; i++ ){
+			solve( states[i] );
+		}
 }
 
 /*=====================================Print X and Y set========================================*/
